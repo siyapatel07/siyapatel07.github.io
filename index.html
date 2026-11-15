@@ -480,6 +480,9 @@ section{padding-block:72px 24px}
 .pin.home circle{fill:var(--ink)}
 .pin.visited circle{fill:#E2C98F}
 .pin.wishlist circle{fill:none;stroke:var(--pencil);stroke-dasharray:3 2}
+.pin.group circle{stroke-width:3}
+.pin.group.wishlist circle{fill:#F4F1E2;stroke-dasharray:none}
+.pin.group.mixed circle{fill:#B9C9C2}
 .map-tip{position:absolute;pointer-events:none;background:var(--sheet);border:1.5px solid var(--ink);padding:6px 10px;font-family:var(--f-mono);font-size:12px;transform:translate(-50%,calc(-100% - 14px));white-space:nowrap;box-shadow:var(--shadow)}
 .travel-log{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:22px;margin-top:30px}
 .log{background:var(--sheet);border:1.5px solid var(--ink)}
@@ -662,7 +665,7 @@ section{padding-block:72px 24px}
     <div class="wrap">
       <section>
         <div class="sched"><h2>Travel map</h2><span class="label">Places ledger</span></div>
-        <p class="lede">Homes, places I’ve been and places I want to go. Drag to move, use + and − to zoom, and tap a pin for its name.</p>
+        <p class="lede">Homes, places I’ve been and places I want to go. Drag to move, use + and − to zoom, and tap a dot for its name. Tap a bold dot to zoom in on a group of places.</p>
         <div class="map-shell obj" style="--r:0deg">
           <div class="map-tools">
             <button class="chip" type="button" data-layer="home" aria-pressed="true"><i style="background:var(--ink)"></i>Homes <b id="cHome"></b></button>
@@ -925,15 +928,36 @@ function proj(lat,lon){return [(lon+180)*4,(85-lat)*4]}
 var layers={home:S.travel.homes||[],visited:S.travel.visited||[],wishlist:S.travel.wishlist||[]};
 var on={home:true,visited:true,wishlist:true};
 $("#cHome").textContent=layers.home.length;$("#cVisited").textContent=layers.visited.length;$("#cWish").textContent=layers.wishlist.length;
+var clusters=[];
 function drawPins(){
   var bw=map.getBoundingClientRect().width; if(!bw)return;
-  var scale=view.w/bw, r=6*scale, fs=12*scale; // svg units per screen px
-  var html="";
+  var scale=view.w/bw, r=6*scale, gap=14*scale; // svg units per screen px; dots closer than 14px overlap
+  var pts=[];
   ["wishlist","visited","home"].forEach(function(t){ if(!on[t])return;
-    layers[t].forEach(function(p,i){var c=proj(p.lat,p.lon);
-      html+='<g class="pin '+t+'" data-t="'+t+'" data-i="'+i+'" tabindex="0" role="button" aria-label="'+esc(p.name+(p.note?" — "+p.note:""))+'"><circle cx="'+c[0]+'" cy="'+c[1]+'" r="'+r+'"/>'+
-        (W/view.w>6?'<text x="'+(c[0]+r*1.6)+'" y="'+(c[1]+fs*(i%2?1.3:-.2))+'" font-size="'+fs+'">'+esc(p.name)+'</text>':'')+'</g>';
-    });
+    layers[t].forEach(function(p,i){var c=proj(p.lat,p.lon);pts.push({t:t,i:i,x:c[0],y:c[1]})});
+  });
+  // group overlapping dots: keep merging any two groups whose centres overlap, placing each group at the average location
+  var cl=pts.map(function(p){return {m:[p],x:p.x,y:p.y}});
+  var atMax=view.w<=19, merged=!atMax;
+  while(merged){merged=false;
+    for(var a=0;a<cl.length&&!merged;a++)for(var b=a+1;b<cl.length;b++){
+      if(Math.hypot(cl[a].x-cl[b].x,cl[a].y-cl[b].y)<gap){
+        var m=cl[a].m.concat(cl[b].m), sx=0, sy=0; m.forEach(function(p){sx+=p.x;sy+=p.y});
+        cl[a]={m:m,x:sx/m.length,y:sy/m.length}; cl.splice(b,1); merged=true; break;
+      }
+    }
+  }
+  clusters=cl;
+  var order={wishlist:0,visited:1,home:2};
+  cl.sort(function(a,b){return order[a.m[0].t]-order[b.m[0].t]});
+  var html="";
+  cl.forEach(function(c,k){
+    if(c.m.length===1){var q=c.m[0],p=layers[q.t][q.i];
+      html+='<g class="pin '+q.t+'" data-t="'+q.t+'" data-i="'+q.i+'" tabindex="0" role="button" aria-label="'+esc(p.name+(p.note?" — "+p.note:""))+'"><circle cx="'+c.x+'" cy="'+c.y+'" r="'+r+'"/></g>';
+    } else {
+      var types={}; c.m.forEach(function(q){types[q.t]=1}); var t=Object.keys(types), cls=t.length===1?t[0]:"mixed";
+      html+='<g class="pin group '+cls+'" data-c="'+k+'" tabindex="0" role="button" aria-label="'+c.m.length+' places, zoom in"><circle cx="'+c.x+'" cy="'+c.y+'" r="'+(r*1.35)+'"/></g>';
+    }
   });
   $("#pins").innerHTML=html;
 }
@@ -948,9 +972,11 @@ function zoomAt(f,cx,cy){ if(cx==null){cx=view.x+view.w/2;cy=view.y+view.h/2}
   var nw=view.w/f; setView({x:cx-(cx-view.x)/f,y:cy-(cy-view.y)/f,w:nw,h:nw*boxRatio()}) }
 function focusOn(lat,lon,w){var c=proj(lat,lon),q=boxRatio();setView({x:c[0]-w/2,y:c[1]-w*q/2,w:w,h:w*q})}
 var animId=null;
-function flyTo(lat,lon,w){
-  if(reduce){focusOn(lat,lon,w);return}
-  var c=proj(lat,lon), from=Object.assign({},view), to={w:w}; var q=boxRatio(); w=Math.min(w,W,H/q); to.w=w; to.x=c[0]-w/2; to.y=c[1]-w*q/2;
+function flyTo(lat,lon,w){flyToPt(proj(lat,lon),w)}
+function flyToPt(c,w){
+  tip.hidden=true;
+  if(reduce){var q0=boxRatio();setView({x:c[0]-w/2,y:c[1]-w*q0/2,w:w,h:w*q0});return}
+  var from=Object.assign({},view), to={w:w}; var q=boxRatio(); w=Math.min(w,W,H/q); to.w=w; to.x=c[0]-w/2; to.y=c[1]-w*q/2;
   var t0=performance.now(); cancelAnimationFrame(animId);
   (function step(now){var t=Math.min(1,(now-t0)/900), e=t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;
     var lw=Math.exp(Math.log(from.w)+(Math.log(to.w)-Math.log(from.w))*e);
@@ -985,14 +1011,27 @@ box.addEventListener("pointermove",function(ev){
 function up(ev){delete pointers[ev.pointerId];drag=null}
 box.addEventListener("pointerup",up);box.addEventListener("pointercancel",up);
 box.addEventListener("wheel",function(ev){ev.preventDefault();var p=svgPt(ev);zoomAt(ev.deltaY<0?1.25:0.8,p[0],p[1])},{passive:false});
+function openGroup(g){
+  var c=clusters[+g.getAttribute("data-c")]; if(!c)return;
+  var x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;
+  c.m.forEach(function(p){x0=Math.min(x0,p.x);x1=Math.max(x1,p.x);y0=Math.min(y0,p.y);y1=Math.max(y1,p.y)});
+  var q=boxRatio(), fit=Math.max(x1-x0,(y1-y0)/q)*1.8, w=Math.max(18,Math.min(view.w/2.5,fit));
+  if(view.w<=19){showGroupTip(c);return}
+  flyToPt([(x0+x1)/2,(y0+y1)/2],w);
+}
+function showGroupTip(c){
+  var r=map.getBoundingClientRect(), br=box.getBoundingClientRect();
+  tip.textContent=c.m.map(function(q){return layers[q.t][q.i].name}).join(" · "); tip.hidden=false;
+  tip.style.left=((c.x-view.x)/view.w*r.width+r.left-br.left)+"px"; tip.style.top=((c.y-view.y)/view.h*r.height+r.top-br.top)+"px";
+}
+function hit(g){ if(g.classList.contains("group"))openGroup(g); else showTip(g) }
 function showTip(g){
   var p=layers[g.getAttribute("data-t")][+g.getAttribute("data-i")], c=proj(p.lat,p.lon), r=map.getBoundingClientRect(), br=box.getBoundingClientRect();
   tip.textContent=p.name+(p.note?" — "+p.note:""); tip.hidden=false;
   tip.style.left=((c[0]-view.x)/view.w*r.width+r.left-br.left)+"px"; tip.style.top=((c[1]-view.y)/view.h*r.height+r.top-br.top)+"px";
 }
-map.addEventListener("click",function(ev){var g=ev.target.closest(".pin");if(g){showTip(g)}else tip.hidden=true});
-map.addEventListener("keydown",function(ev){var g=ev.target.closest(".pin");if(g&&(ev.key==="Enter"||ev.key===" ")){ev.preventDefault();showTip(g)}});
-map.addEventListener("pointerover",function(ev){var g=ev.target.closest(".pin");if(g&&ev.pointerType==="mouse")showTip(g)});
+map.addEventListener("click",function(ev){var g=ev.target.closest(".pin");if(g){hit(g)}else tip.hidden=true});
+map.addEventListener("keydown",function(ev){var g=ev.target.closest(".pin");if(g&&(ev.key==="Enter"||ev.key===" ")){ev.preventDefault();hit(g)}});
 var logs=[["home","Homes"],["visited","Places I’ve been"],["wishlist","Places I want to go"]];
 $("#travelLog").innerHTML = logs.map(function(l){
   var list=layers[l[0]];
